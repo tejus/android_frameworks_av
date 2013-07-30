@@ -57,6 +57,10 @@ LOCAL_SRC_FILES += FastMixer.cpp FastMixerState.cpp AudioWatchdog.cpp
 
 LOCAL_CFLAGS += -DSTATE_QUEUE_INSTANTIATIONS='"StateQueueInstantiations.cpp"'
 
+ifneq ($(BOARD_USE_HARDCODED_FAST_TRACK_LATENCY_WHEN_DENIED),)
+LOCAL_CFLAGS += -DHARDCODED_FAST_TRACK_LATENCY_WHEN_DENIED=$(BOARD_USE_HARDCODED_FAST_TRACK_LATENCY_WHEN_DENIED)
+endif
+
 # Define ANDROID_SMP appropriately. Used to get inline tracing fast-path.
 ifeq ($(TARGET_CPU_SMP),true)
     LOCAL_CFLAGS += -DANDROID_SMP=1
