@@ -654,6 +654,14 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
 #ifdef ENABLE_QC_AV_ENHANCEMENTS
         } else if (meta->findData(kKeyRawCodecSpecificData, &type, &data, &size)) {
             ALOGV("OMXCodec::configureCodec found kKeyRawCodecSpecificData of size %d\n", size);
+            if (!strncmp(mComponentName, "OMX.qcom.video.decoder.mpeg4",
+                         sizeof("OMX.qcom.video.decoder.mpeg4"))) {
+                bool isDP = ExtendedCodec::checkDPFromCodecSpecificData((const uint8_t*)data, size);
+                if (isDP) {
+                    ALOGE("H/W Decode Error: Data Partitioned bit set in the Header");
+                    return BAD_VALUE;
+                }
+            }
             addCodecSpecificData(data, size);
 #endif
         } else {
@@ -755,7 +763,10 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
     if (!strncasecmp(mMIME, "video/", 6)) {
 
         if (mIsEncoder) {
-            setVideoInputFormat(mMIME, meta);
+            status_t err = setVideoInputFormat(mMIME, meta);
+            if (err != OK) {
+                return err;
+            }
         } else {
             status_t err = setVideoOutputFormat(
                     mMIME, meta);
@@ -1027,7 +1038,7 @@ status_t OMXCodec::isColorFormatSupported(
     return UNKNOWN_ERROR;
 }
 
-void OMXCodec::setVideoInputFormat(
+status_t OMXCodec::setVideoInputFormat(
         const char *mime, const sp<MetaData>& meta) {
 
     int32_t width, height, frameRate, bitRate, stride, sliceHeight;
@@ -1065,21 +1076,30 @@ void OMXCodec::setVideoInputFormat(
     OMX_VIDEO_PORTDEFINITIONTYPE *video_def = &def.format.video;
 
     //////////////////////// Input port /////////////////////////
-    CHECK_EQ(setVideoPortFormatType(
-            kPortIndexInput, OMX_VIDEO_CodingUnused,
-            colorFormat), (status_t)OK);
+    err = setVideoPortFormatType(
+            kPortIndexInput, OMX_VIDEO_CodingUnused, colorFormat);
+    if(err != OK) {
+        ALOGE("Setting OMX_VIDEO_CodingUnused failed");
+        return err;
+    }
 
     InitOMXParams(&def);
     def.nPortIndex = kPortIndexInput;
 
     err = mOMX->getParameter(
             mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
-    CHECK_EQ(err, (status_t)OK);
+    if(err != OK) {
+        ALOGE("Getting OMX_IndexParamPortDefinition failed");
+        return err;
+    }
 
     def.nBufferSize = getFrameSize(colorFormat,
             stride > 0? stride: -stride, sliceHeight);
 
-    CHECK_EQ((int)def.eDomain, (int)OMX_PortDomainVideo);
+    if((int)def.eDomain != (int)OMX_PortDomainVideo) {
+        ALOGE("Input port: Not a Video Domain!!");
+        return UNKNOWN_ERROR;
+    }
 
     video_def->nFrameWidth = width;
     video_def->nFrameHeight = height;
@@ -1091,20 +1111,33 @@ void OMXCodec::setVideoInputFormat(
 
     err = mOMX->setParameter(
             mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
-    CHECK_EQ(err, (status_t)OK);
+    if(err != OK) {
+        ALOGE("Setting Video InPort Definition failed");
+        return err;
+    }
 
     //////////////////////// Output port /////////////////////////
-    CHECK_EQ(setVideoPortFormatType(
-            kPortIndexOutput, compressionFormat, OMX_COLOR_FormatUnused),
-            (status_t)OK);
+    err = setVideoPortFormatType(
+            kPortIndexOutput, compressionFormat, OMX_COLOR_FormatUnused);
+    if(err != OK) {
+        ALOGE("Setting compressionFormat failed");
+        return err;
+    }
+
     InitOMXParams(&def);
     def.nPortIndex = kPortIndexOutput;
 
     err = mOMX->getParameter(
             mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
+    if(err != OK) {
+        ALOGE("Getting Video InPort Definition failed");
+        return err;
+    }
 
-    CHECK_EQ(err, (status_t)OK);
-    CHECK_EQ((int)def.eDomain, (int)OMX_PortDomainVideo);
+    if((int)def.eDomain != (int)OMX_PortDomainVideo) {
+        ALOGE("Output port: Not a Video Domain");
+        return UNKNOWN_ERROR;
+    }
 
     video_def->nFrameWidth = width;
     video_def->nFrameHeight = height;
@@ -1119,7 +1152,10 @@ void OMXCodec::setVideoInputFormat(
 
     err = mOMX->setParameter(
             mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
-    CHECK_EQ(err, (status_t)OK);
+    if(err != OK) {
+        ALOGE("Setting Video OutPort Definition failed");
+        return err;
+    }
 
     /////////////////// Codec-specific ////////////////////////
     switch (compressionFormat) {
@@ -1143,6 +1179,7 @@ void OMXCodec::setVideoInputFormat(
             CHECK(!"Support for this compressionFormat to be implemented.");
             break;
     }
+    return OK;
 }
 
 static OMX_U32 setPFramesSpacing(int32_t iFramesInterval, int32_t frameRate) {
@@ -1650,7 +1687,11 @@ OMXCodec::OMXCodec(
               || !strcmp(componentName, "OMX.Nvidia.mpeg2v.decode"))
                         ? NULL : nativeWindow),
       mNumBFrames(0),
-      mInSmoothStreamingMode(false) {
+      mInSmoothStreamingMode(false)
+#ifdef QCOM_HARDWARE
+      ,mDeferReason(0)
+#endif
+{
     mPortStatus[kPortIndexInput] = ENABLED;
     mPortStatus[kPortIndexOutput] = ENABLED;
 
@@ -1773,6 +1814,10 @@ OMXCodec::~OMXCodec() {
     CHECK_EQ(err, (status_t)OK);
 
     mNode = NULL;
+
+    releaseMediaBuffersOn(kPortIndexOutput);
+    releaseMediaBuffersOn(kPortIndexInput);
+
     setState(DEAD);
 
     clearCodecSpecificData();
@@ -1812,6 +1857,13 @@ status_t OMXCodec::init() {
         mAsyncCompletion.wait(mLock);
     }
 
+    /*
+     * If the native window is valid, we need to do the extra work of
+     * cancelling buffers back.
+     */
+    if (mState == ERROR) {
+        flushBuffersOnError();
+    }
     return mState == ERROR ? UNKNOWN_ERROR : OK;
 }
 
@@ -2216,9 +2268,15 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         cancelEnd = def.nBufferCountActual;
     }
 
-    for (OMX_U32 i = cancelStart; i < cancelEnd; i++) {
-        BufferInfo *info = &mPortBuffers[kPortIndexOutput].editItemAt(i);
-        cancelBufferToNativeWindow(info);
+
+    if (err != 0 &&
+        ((mState == LOADED) || (mState == LOADED_TO_IDLE))) {
+        freeBuffersOnPort(kPortIndexOutput);
+    } else {
+        for (OMX_U32 i = cancelStart; i < cancelEnd; i++) {
+            BufferInfo *info = &mPortBuffers[kPortIndexOutput].editItemAt(i);
+            cancelBufferToNativeWindow(info);
+        }
     }
 
     return err;
@@ -2765,6 +2823,26 @@ void OMXCodec::onEvent(OMX_EVENTTYPE event, OMX_U32 data1, OMX_U32 data2) {
                        data1, data2);
 
             if (data2 == 0 || data2 == OMX_IndexParamPortDefinition) {
+#ifdef QCOM_HARDWARE
+                if ((data1 == kPortIndexOutput) && !mFilledBuffers.empty()) {
+                    mOutputPortSettingsChangedPending = true;
+                    mDeferReason |= FILLED_BUFFERS_PRESENT;
+                }
+
+                if (countOutputBuffers(OWNED_BY_CLIENT) > 0) {
+                    mOutputPortSettingsChangedPending = true;
+                    mDeferReason |= BUFFER_WITH_CLIENT;
+                }
+
+                if (mDeferReason & (FILLED_BUFFERS_PRESENT | BUFFER_WITH_CLIENT)) {
+                    ALOGW("%s: Defer port settings changed handling as "
+                          "mDeferReason %d != 0", mComponentName, mDeferReason);
+                    mBufferFilled.signal();
+                    mAsyncCompletion.signal();
+                } else {
+                    onPortSettingsChanged(data1);
+                }
+#else
                 // There is no need to check whether mFilledBuffers is empty or not
                 // when the OMX_EventPortSettingsChanged is not meant for reallocating
                 // the output buffers.
@@ -2772,6 +2850,7 @@ void OMXCodec::onEvent(OMX_EVENTTYPE event, OMX_U32 data1, OMX_U32 data2) {
                     CHECK(mFilledBuffers.empty());
                 }
                 onPortSettingsChanged(data1);
+#endif
             } else if (data1 == kPortIndexOutput &&
                         (data2 == OMX_IndexConfigCommonOutputCrop ||
                          data2 == OMX_IndexConfigCommonScale)) {
@@ -2870,6 +2949,12 @@ void OMXCodec::onCmdComplete(OMX_COMMANDTYPE cmd, OMX_U32 data) {
                 // wasn't of importance to them, i.e. it may be that just the
                 // number of buffers has changed and nothing else.
                 bool formatChanged = formatHasNotablyChanged(oldOutputFormat, mOutputFormat);
+
+#ifdef QCOM_HARDWARE
+                if (formatChanged) {
+                    CODEC_LOGV("reconfig handling, formatHasNotablyChanged");
+                }
+#endif
                 if (!mOutputPortSettingsHaveChanged) {
                     mOutputPortSettingsHaveChanged = formatChanged;
                 }
@@ -2970,10 +3055,23 @@ void OMXCodec::onCmdComplete(OMX_COMMANDTYPE cmd, OMX_U32 data) {
                 }
 
                 if (mOutputPortSettingsChangedPending) {
+#ifdef QCOM_HARDWARE
+                    mOutputPortSettingsChangedPending = false; //no need to unset mDeferReason
+                    if (countOutputBuffers(OWNED_BY_CLIENT) > 0) {
+                        mOutputPortSettingsChangedPending = true;
+                        mDeferReason |= BUFFER_WITH_CLIENT;
+                        mBufferFilled.signal();
+                        mAsyncCompletion.signal();
+                        break;
+                    }
+#endif
                     CODEC_LOGV(
                             "Honoring deferred output port settings change.");
-
+#ifdef QCOM_HARDWARE
+                    CHECK(mFilledBuffers.empty()); //since after flush
+#else
                     mOutputPortSettingsChangedPending = false;
+#endif
                     onPortSettingsChanged(kPortIndexOutput);
                 }
             }
@@ -4195,6 +4293,7 @@ status_t OMXCodec::stopOmxComponent_l() {
     }
 
     bool isError = false;
+    bool forceFlush = false;
     switch (mState) {
         case LOADED:
             break;
@@ -4223,6 +4322,7 @@ status_t OMXCodec::stopOmxComponent_l() {
                 CHECK_EQ(err, (status_t)OK);
 
                 if (state != OMX_StateExecuting) {
+                    forceFlush = true;
                     break;
                 }
                 // else fall through to the idling code
@@ -4278,6 +4378,10 @@ status_t OMXCodec::stopOmxComponent_l() {
                 mAsyncCompletion.wait(mLock);
             }
 
+            if (mState == ERROR) {
+                forceFlush = true;
+            }
+
             if (isError) {
                 // We were in the ERROR state coming in, so restore that now
                 // that we've idled the OMX component.
@@ -4293,6 +4397,8 @@ status_t OMXCodec::stopOmxComponent_l() {
             break;
         }
     }
+
+    if (forceFlush) flushBuffersOnError();
 
     if (mLeftOverBuffer) {
         mLeftOverBuffer->release();
@@ -4369,6 +4475,9 @@ status_t OMXCodec::read(
         mSeekMode = seekMode;
 
         mFilledBuffers.clear();
+#ifdef QCOM_HARDWARE
+        mDeferReason &= ~FILLED_BUFFERS_PRESENT;
+#endif
 
         CHECK_EQ((int)mState, (int)EXECUTING);
 #ifdef QCOM_HARDWARE
@@ -4412,7 +4521,11 @@ status_t OMXCodec::read(
         }
     }
 
-    while (mState != ERROR && !mNoMoreOutputData && mFilledBuffers.empty()) {
+    while (mState != ERROR && !mNoMoreOutputData &&
+#ifdef QCOM_HARDWARE
+           !mOutputPortSettingsChangedPending &&
+#endif
+           mFilledBuffers.empty()) {
         if ((err = waitForBufferFilled_l()) != OK) {
             return err;
         }
@@ -4423,6 +4536,18 @@ status_t OMXCodec::read(
     }
 
     if (mFilledBuffers.empty()) {
+#ifdef QCOM_HARDWARE
+        if (mOutputPortSettingsChangedPending) {
+            mDeferReason &= ~FILLED_BUFFERS_PRESENT;
+
+            if (countOutputBuffers(OWNED_BY_CLIENT) == 0) {
+                mDeferReason &= ~BUFFER_WITH_CLIENT;
+                mOutputPortSettingsChangedPending = false;
+                onPortSettingsChanged(kPortIndexOutput);
+            }
+            return INFO_FORMAT_CHANGED;
+        }
+#endif
         return mSignalledEOS ? mFinalStatus : ERROR_END_OF_STREAM;
     }
 
@@ -4462,7 +4587,12 @@ void OMXCodec::signalBufferReturned(MediaBuffer *buffer) {
             info->mStatus = OWNED_BY_US;
 
             if (buffer->graphicBuffer() == 0) {
-                fillOutputBuffer(info);
+#ifdef QCOM_HARDWARE
+                //skip FTB if port settings handling is pending
+                if (!mOutputPortSettingsChangedPending)
+#endif
+                    fillOutputBuffer(info);
+
             } else {
                 sp<MetaData> metaData = info->mMediaBuffer->meta_data();
                 int32_t rendered = 0;
@@ -4478,6 +4608,11 @@ void OMXCodec::signalBufferReturned(MediaBuffer *buffer) {
 
                 info->mStatus = OWNED_BY_NATIVE_WINDOW;
 
+#ifdef QCOM_HARDWARE
+                //skip FTB if port settings handling is pending
+                if (mOutputPortSettingsChangedPending) break;
+#endif
+
                 // Dequeue the next buffer from the native window.
                 BufferInfo *nextBufInfo = dequeueBufferFromNativeWindow();
                 if (nextBufInfo == 0) {
@@ -4490,6 +4625,21 @@ void OMXCodec::signalBufferReturned(MediaBuffer *buffer) {
             return;
         }
     }
+
+#ifdef QCOM_HARDWARE
+    if (mOutputPortSettingsChangedPending) {
+        if (countOutputBuffers(OWNED_BY_CLIENT) == 0) {
+            mDeferReason &= ~BUFFER_WITH_CLIENT;
+        }
+
+        if (!mFilledBuffers.empty()) return;
+
+        mOutputPortSettingsChangedPending = false;
+        mDeferReason &= ~BUFFER_WITH_CLIENT;
+        onPortSettingsChanged(kPortIndexOutput);
+        return;
+    }
+#endif
 
     CHECK(!"should not be here.");
 }
@@ -5281,5 +5431,117 @@ status_t getOMXChannelMapping(size_t numChannels, OMX_AUDIO_CHANNELTYPE map[]) {
 
     return OK;
 }
+
+status_t OMXCodec::releaseMediaBuffersOn(OMX_U32 portIndex) {
+    if (mPortBuffers[portIndex].size() == 0) {
+        return OK;
+    }
+
+    if (mState != ERROR) {
+        CODEC_LOGE("assertion failure, needs to be investigated why %s "
+              " buffers are still pending",
+              portIndex == kPortIndexOutput ? "output" : "input");
+        //CHECK(!"shouldn't be here");
+    }
+
+    Vector<BufferInfo> *buffers = &mPortBuffers[portIndex];
+
+    for (size_t i = buffers->size(); i-- > 0;) {
+        BufferInfo *info = &buffers->editItemAt(i);
+        if (info->mMediaBuffer) {
+            CHECK_EQ(portIndex, (OMX_U32)kPortIndexOutput);
+            info->mMediaBuffer->setObserver(NULL);
+
+            // Make sure nobody but us owns this buffer at this point.
+            CHECK_EQ(info->mMediaBuffer->refcount(), 0);
+
+            info->mMediaBuffer->release();
+            info->mMediaBuffer = NULL;
+        }
+        buffers->removeAt(i);
+    }
+    return OK;
+}
+
+/*
+ * Last resort to flush buffers and additionally cancel all native window buffers.
+ *
+ * lock _must_ be acquired in caller
+ */
+status_t OMXCodec::flushBuffersOnError() {
+    if (mState != ERROR) {
+        return INVALID_OPERATION;
+    }
+
+    OMX_STATETYPE state = OMX_StateInvalid;
+    status_t err = mOMX->getState(mNode, &state);
+    CHECK_EQ(err, (status_t)OK); //component is alive
+
+    mPortStatus[kPortIndexOutput] = ENABLED;
+    mPortStatus[kPortIndexInput] = ENABLED;
+
+    setState(EXECUTING_TO_IDLE);
+
+    flushPortAsync(kPortIndexOutput);
+    flushPortAsync(kPortIndexInput);
+
+    size_t kRetries = 15;
+
+    bool outputBuffersPending =
+        countBuffersWeOwn(mPortBuffers[kPortIndexOutput]) !=
+        mPortBuffers[kPortIndexOutput].size();
+
+    bool inputBuffersPending =
+        countBuffersWeOwn(mPortBuffers[kPortIndexInput]) !=
+        mPortBuffers[kPortIndexInput].size();
+
+    setState(ERROR); //drop all except EBD/FBD
+    while ((outputBuffersPending || inputBuffersPending) && --kRetries) {
+        mLock.unlock();
+        usleep(10000);
+        mLock.lock();
+
+        outputBuffersPending =
+            countBuffersWeOwn(mPortBuffers[kPortIndexOutput]) !=
+            mPortBuffers[kPortIndexOutput].size();
+
+        inputBuffersPending =
+            countBuffersWeOwn(mPortBuffers[kPortIndexInput]) !=
+            mPortBuffers[kPortIndexInput].size();
+    }
+
+    if (inputBuffersPending || outputBuffersPending) {
+        ALOGE("Timed out waiting for all input/output buffers to be returned, "
+              "there might be a leak");
+    }
+
+    //additional work for native buffers
+    if (mNativeWindow != NULL) {
+        Vector<BufferInfo> *buffers = &mPortBuffers[kPortIndexOutput];
+        for (size_t i = 0; i < buffers->size(); ++i) {
+            BufferInfo *info = &buffers->editItemAt(i);
+            if (info->mStatus == OWNED_BY_US) {
+                cancelBufferToNativeWindow(info);
+            }
+        }
+    }
+
+    return OK;
+}
+
+#ifdef QCOM_HARDWARE
+size_t OMXCodec::countOutputBuffers(BufferStatus status) {
+    size_t count = 0;
+    Vector<BufferInfo> *buffers = &mPortBuffers[kPortIndexOutput];
+
+    for (size_t i = buffers->size(); i-- > 0;) {
+        BufferInfo *info = &buffers->editItemAt(i);
+        if (info->mStatus == status)
+            ++count;
+    }
+
+    return count;
+}
+#endif
 
 }  // namespace android

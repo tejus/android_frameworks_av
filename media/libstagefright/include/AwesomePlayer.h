@@ -105,6 +105,9 @@ struct AwesomePlayer {
     void printFileName(int fd);
     status_t dump(int fd, const Vector<String16> &args) const;
 
+    status_t suspend();
+    status_t resume();
+
 private:
     friend struct AwesomeEvent;
     friend struct PreviewPlayer;
@@ -202,6 +205,9 @@ private:
 
     bool mWatchForAudioSeekComplete;
     bool mWatchForAudioEOS;
+
+    bool mIsFirstFrameAfterResume;
+
 #ifdef QCOM_HARDWARE
     static int mTunnelAliveAP;
 #endif
@@ -239,6 +245,7 @@ private:
     sp<DecryptHandle> mDecryptHandle;
 
     int64_t mLastVideoTimeUs;
+    int64_t mFrameDurationUs;
     TimedTextDriver *mTextDriver;
 
     sp<WVMExtractor> mWVMExtractor;
@@ -358,6 +365,8 @@ private:
         int64_t mResumeDelayStartUs;
         int64_t mSeekDelayStartUs;
     } mStats;
+
+    bool mBufferingDone;
 
     status_t setVideoScalingMode(int32_t mode);
     status_t setVideoScalingMode_l(int32_t mode);
