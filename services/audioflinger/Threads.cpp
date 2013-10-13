@@ -2064,7 +2064,13 @@ if (mType == MIXER) {
         // only process effects if we're going to write
         if (sleepTime == 0) {
             for (size_t i = 0; i < effectChains.size(); i ++) {
-                effectChains[i]->process_l();
+#ifdef QCOM_HARDWARE
+                if (effectChains[i] != mAudioFlinger->mLPAEffectChain) {
+#endif
+                    effectChains[i]->process_l();
+#ifdef QCOM_HARDWARE
+                }
+#endif
             }
         }
 
@@ -3834,6 +3840,7 @@ bool AudioFlinger::RecordThread::threadLoop()
                             } else {
                                 readInto = mRsmpInBuffer;
                                 mRsmpInIndex = 0;
+                                InputBytes = mInputBytes;
                             }
                             mBytesRead = mInput->stream->read(mInput->stream, readInto,
                                     InputBytes);
