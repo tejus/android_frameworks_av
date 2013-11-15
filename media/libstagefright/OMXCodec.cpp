@@ -336,6 +336,7 @@ uint32_t OMXCodec::getComponentQuirks(
       quirks |= kInputBufferSizesAreBogus;
     }
 #endif
+    return quirks;
 }
 
 
