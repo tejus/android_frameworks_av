@@ -258,8 +258,10 @@ void SoftwareRenderer::render(
                 dst_y[j + 1] = src[3];
                 dst_y[j + buf->stride] = src[nl_src + 1];
                 dst_y[j + buf->stride + 1] = src[nl_src + 3];
-                *dst_v++ = (src[2] + src[nl_src + 2]) / 2;
-                *dst_u++ = (src[0] + src[nl_src]) / 2;
+//Fix colors. Picked from milestone2 repo.
+                *dst_u++ = (src[2] + src[nl_src + 2]) / 2;
+                *dst_v++ = (src[0] + src[nl_src]) / 2;
+//
                 src += 4;
             }
             src += nl_src;
@@ -297,6 +299,7 @@ void SoftwareRenderer::render(
         uint8_t *dst_y = (uint8_t *)dst;
         uint8_t *dst_v = dst_y + dst_y_size;
         uint8_t *dst_u = dst_v + dst_c_size;
+
 #endif
 
         for (int y = 0; y < mCropHeight; ++y) {
