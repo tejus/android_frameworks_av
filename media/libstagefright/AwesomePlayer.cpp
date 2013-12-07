@@ -1206,7 +1206,7 @@ void AwesomePlayer::initRenderer_l() {
 #ifdef OMAP_COMPAT
             && strncmp(component, "OMX.TI.", 7)
 #endif
-            && strncmp(component, "OMX.google.", 11) {
+            && strncmp(component, "OMX.google.", 11)) {
         // Hardware decoders avoid the CPU color conversion by decoding
         // directly to ANativeBuffers, so we must use a renderer that
         // just pushes those buffers to the ANativeWindow.
