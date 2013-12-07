@@ -481,12 +481,7 @@ sp<MediaSource> OMXCodec::Create(
             observer->setCodec(codec);
 
             err = codec->configureCodec(meta);
-
             if (err == OK) {
-                if (!strcmp("OMX.Nvidia.mpeg2v.decode", componentName)) {
-                    codec->mFlags |= kOnlySubmitOneInputBufferAtOneTime;
-                }
-
                 return codec;
             }
 
@@ -1585,7 +1580,7 @@ OMXCodec::OMXCodec(
 #ifdef OMAP_COMPAT
               || !strncmp(componentName, "OMX.TI.", 7)
 #endif
-              || !strcmp(componentName, "OMX.Nvidia.mpeg2v.decode"))
+              )
                         ? NULL : nativeWindow) {
     mPortStatus[kPortIndexInput] = ENABLED;
     mPortStatus[kPortIndexOutput] = ENABLED;
