@@ -1,4 +1,7 @@
 /*
+ * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+ * Not a Contribution.
+ *
  * Copyright (C) 2009 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,6 +40,10 @@
 #include <media/stagefright/MediaSource.h>
 #include <media/stagefright/MetaData.h>
 #include <utils/String8.h>
+#ifdef ENABLE_AV_ENHANCEMENTS
+#include <QCMediaDefs.h>
+#include "include/ExtendedUtils.h"
+#endif
 
 namespace android {
 
@@ -186,6 +193,11 @@ MPEG4DataSource::MPEG4DataSource(const sp<DataSource> &source)
       mCachedOffset(0),
       mCachedSize(0),
       mCache(NULL) {
+      #ifdef DOLBY_UDC
+      #if defined (DEBUG_LOG_DDP_DECODER_EXTRA)
+      ALOGE("@DDP MPEG4DataSource::MPEG4DataSource");
+      #endif
+      #endif //DOLBY_UDC
 }
 
 MPEG4DataSource::~MPEG4DataSource() {
@@ -293,9 +305,22 @@ static void hexdump(const void *_data, size_t size) {
 }
 
 static const char *FourCC2MIME(uint32_t fourcc) {
+    #ifdef DOLBY_UDC
+    #if defined (DEBUG_LOG_DDP_DECODER_EXTRA)
+    ALOGE("@DDP FourCC2MIME");
+    #endif
+    #endif //DOLBY_UDC
     switch (fourcc) {
         case FOURCC('m', 'p', '4', 'a'):
             return MEDIA_MIMETYPE_AUDIO_AAC;
+
+        case FOURCC('e', 'n', 'c', 'a'):
+            return MEDIA_MIMETYPE_AUDIO_AAC;
+
+#ifdef QCOM_HARDWARE
+        case FOURCC('.', 'm', 'p', '3'):
+            return MEDIA_MIMETYPE_AUDIO_MPEG;
+#endif
 
         case FOURCC('s', 'a', 'm', 'r'):
             return MEDIA_MIMETYPE_AUDIO_AMR_NB;
@@ -306,6 +331,9 @@ static const char *FourCC2MIME(uint32_t fourcc) {
         case FOURCC('m', 'p', '4', 'v'):
             return MEDIA_MIMETYPE_VIDEO_MPEG4;
 
+        case FOURCC('e', 'n', 'c', 'v'):
+            return MEDIA_MIMETYPE_VIDEO_MPEG4;
+
         case FOURCC('s', '2', '6', '3'):
         case FOURCC('h', '2', '6', '3'):
         case FOURCC('H', '2', '6', '3'):
@@ -314,8 +342,29 @@ static const char *FourCC2MIME(uint32_t fourcc) {
         case FOURCC('a', 'v', 'c', '1'):
             return MEDIA_MIMETYPE_VIDEO_AVC;
 
+#ifdef ENABLE_AV_ENHANCEMENTS
+        case FOURCC('s', 'q', 'c', 'p'):
+            return MEDIA_MIMETYPE_AUDIO_QCELP;
+        case FOURCC('s', 'e', 'v', 'c'):
+            return MEDIA_MIMETYPE_AUDIO_EVRC;
+        case FOURCC('d', 't', 's', 'c'):
+        case FOURCC('d', 't', 's', 'h'):
+        case FOURCC('d', 't', 's', 'l'):
+            return MEDIA_MIMETYPE_AUDIO_DTS;
+        case FOURCC('d', 't', 's', 'e'):
+            return MEDIA_MIMETYPE_AUDIO_DTS_LBR;
+        case FOURCC('a', 'c', '-', '3'):
+            return MEDIA_MIMETYPE_AUDIO_AC3;
+        case FOURCC('e', 'c', '-', '3'):
+            return MEDIA_MIMETYPE_AUDIO_EAC3;
+#endif
         default:
             CHECK(!"should not be here.");
+            #ifdef DOLBY_UDC
+            #if defined (DEBUG_LOG_DDP_DECODER_EXTRA)
+            ALOGE("@DDP FourCC2Mime default (not found)");
+            #endif
+            #endif //DOLBY_UDC
             return NULL;
     }
 }
@@ -347,6 +396,11 @@ MPEG4Extractor::MPEG4Extractor(const sp<DataSource> &source)
       mFileMetaData(new MetaData),
       mFirstSINF(NULL),
       mIsDrm(false) {
+      #ifdef DOLBY_UDC
+      #if defined (DEBUG_LOG_DDP_DECODER_EXTRA)
+      ALOGE("@DDP MPEG4Extractor::MPEG4Extractor");
+      #endif
+      #endif //DOLBY_UDC
 }
 
 MPEG4Extractor::~MPEG4Extractor() {
@@ -1220,8 +1274,21 @@ status_t MPEG4Extractor::parseChunk(off64_t *offset, int depth) {
 
         case FOURCC('m', 'p', '4', 'a'):
         case FOURCC('e', 'n', 'c', 'a'):
+#ifdef QCOM_HARDWARE
+        case FOURCC('.', 'm', 'p', '3'):
+#endif
         case FOURCC('s', 'a', 'm', 'r'):
         case FOURCC('s', 'a', 'w', 'b'):
+#ifdef QCOM_HARDWARE
+        case FOURCC('s', 'e', 'v', 'c'):
+        case FOURCC('s', 'q', 'c', 'p'):
+        case FOURCC('d', 't', 's', 'c'):
+        case FOURCC('d', 't', 's', 'h'):
+        case FOURCC('d', 't', 's', 'l'):
+        case FOURCC('d', 't', 's', 'e'):
+        case FOURCC('a', 'c', '-', '3'):
+        case FOURCC('e', 'c', '-', '3'):
+#endif
         {
             uint8_t buffer[8 + 20];
             if (chunk_data_size < (ssize_t)sizeof(buffer)) {
@@ -1245,13 +1312,27 @@ status_t MPEG4Extractor::parseChunk(off64_t *offset, int depth) {
                 mLastTrack->meta->setCString(kKeyMIMEType, FourCC2MIME(chunk_type));
                 AdjustChannelsAndRate(chunk_type, &num_channels, &sample_rate);
             }
+            #ifdef DOLBY_UDC
+            #if defined (DEBUG_LOG_DDP_DECODER_EXTRA)
+            ALOGE("@DDP FourCC:'%s'", FourCC2MIME(chunk_type));
+            #endif
+            #endif //DOLBY_UDC
             ALOGV("*** coding='%s' %d channels, size %d, rate %d\n",
                    chunk, num_channels, sample_size, sample_rate);
             mLastTrack->meta->setInt32(kKeyChannelCount, num_channels);
             mLastTrack->meta->setInt32(kKeySampleRate, sample_rate);
 
             off64_t stop_offset = *offset + chunk_size;
+#ifdef QCOM_HARDWARE
+            if (!strcasecmp(MEDIA_MIMETYPE_AUDIO_MPEG, FourCC2MIME(chunk_type)) ||
+                !strcasecmp(MEDIA_MIMETYPE_AUDIO_AMR_WB, FourCC2MIME(chunk_type))) {
+               *offset = stop_offset;
+            } else {
+#endif
             *offset = data_offset + sizeof(buffer);
+#ifdef QCOM_HARDWARE
+            }
+#endif
             while (*offset < stop_offset) {
                 status_t err = parseChunk(offset, depth + 1);
                 if (err != OK) {
@@ -1539,6 +1620,16 @@ status_t MPEG4Extractor::parseChunk(off64_t *offset, int depth) {
             break;
         }
 
+#ifdef QCOM_HARDWARE
+        case FOURCC('d', 'd', 't', 's'):
+        case FOURCC('d', 'a', 'c', '3'):
+        case FOURCC('d', 'e', 'c', '3'):
+        {
+            ALOGV("ddts/dac3/dec3 pass from mpeg4 extractor");
+            *offset += chunk_size;
+            break;
+        }
+#endif
         case FOURCC('a', 'v', 'c', 'C'):
         {
             sp<ABuffer> buffer = new ABuffer(chunk_data_size);
@@ -2241,18 +2332,37 @@ status_t MPEG4Extractor::verifyTrack(Track *track) {
 status_t MPEG4Extractor::updateAudioTrackInfoFromESDS_MPEG4Audio(
         const void *esds_data, size_t esds_size) {
     ESDS esds(esds_data, esds_size);
+    static uint32_t kSamplingRate[] = {
+        96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
+        16000, 12000, 11025, 8000, 7350
+    };
 
     uint8_t objectTypeIndication;
     if (esds.getObjectTypeIndication(&objectTypeIndication) != OK) {
         return ERROR_MALFORMED;
     }
 
+#ifdef ENABLE_AV_ENHANCEMENTS
+    if (objectTypeIndication == 0xA0) {
+       mLastTrack->meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_AUDIO_EVRC);
+       return OK;
+    }
+#endif
     if (objectTypeIndication == 0xe1) {
         // This isn't MPEG4 audio at all, it's QCELP 14k...
         mLastTrack->meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_AUDIO_QCELP);
         return OK;
     }
 
+#ifdef QCOM_HARDWARE
+    if (objectTypeIndication  == 0x6b
+         || objectTypeIndication  == 0x69) {
+        // Our software MP3 audio decoder may not be able to handle
+         mLastTrack->meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_AUDIO_MPEG);
+         ALOGD("objectTypeIndication:0x%x, set mimetype to mpeg ",objectTypeIndication);
+         return OK;
+    }
+#else
     if (objectTypeIndication  == 0x6b) {
         // The media subtype is MP3 audio
         // Our software MP3 audio decoder may not be able to handle
@@ -2260,6 +2370,7 @@ status_t MPEG4Extractor::updateAudioTrackInfoFromESDS_MPEG4Audio(
         ALOGE("MP3 track in MP4/3GPP file is not supported");
         return ERROR_UNSUPPORTED;
     }
+#endif
 
     const uint8_t *csd;
     size_t csd_size;
@@ -2292,10 +2403,17 @@ status_t MPEG4Extractor::updateAudioTrackInfoFromESDS_MPEG4Audio(
         objectType = 32 + br.getBits(6);
     }
 
+    if(objectType == 1) { //AAC Main profile
+        ALOGD("\n >>> Found AAC mainprofile in MPEG4 Extractor... \n");
+    }
+
+    mLastTrack->meta->setInt32(kKeyAACProfile, objectType);
     uint32_t freqIndex = br.getBits(4);
 
     int32_t sampleRate = 0;
+    int32_t extSampleRate = 0;
     int32_t numChannels = 0;
+
     if (freqIndex == 15) {
         if (csd_size < 5) {
             return ERROR_MALFORMED;
@@ -2303,30 +2421,27 @@ status_t MPEG4Extractor::updateAudioTrackInfoFromESDS_MPEG4Audio(
         sampleRate = br.getBits(24);
         numChannels = br.getBits(4);
     } else {
-        numChannels = br.getBits(4);
-        if (objectType == 5) {
-            // SBR specific config per 14496-3 table 1.13
-            freqIndex = br.getBits(4);
-            if (freqIndex == 15) {
-                if (csd_size < 8) {
-                    return ERROR_MALFORMED;
-                }
-                sampleRate = br.getBits(24);
-            }
+        if (freqIndex == 13 || freqIndex == 14) {
+            return ERROR_MALFORMED;
         }
+        numChannels = br.getBits(4);
+        sampleRate = kSamplingRate[freqIndex];
+    }
+    if (objectType == 5 || objectType == 29) {
+        // SBR specific config per 14496-3 table 1.13
+        freqIndex = br.getBits(4);
 
-        if (sampleRate == 0) {
-            static uint32_t kSamplingRate[] = {
-                96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
-                16000, 12000, 11025, 8000, 7350
-            };
-
-            if (freqIndex == 13 || freqIndex == 14) {
+        if (freqIndex == 13 || freqIndex == 14) {
+            return ERROR_MALFORMED;
+        }
+        if (freqIndex == 15) {
+            if (csd_size < 8) {
                 return ERROR_MALFORMED;
             }
-
-            sampleRate = kSamplingRate[freqIndex];
+            extSampleRate = br.getBits(24);
         }
+        extSampleRate = kSamplingRate[freqIndex];
+        mLastTrack->meta->setInt32(kKeyExtSampleRate, extSampleRate);
     }
 
     if (numChannels == 0) {
@@ -2342,6 +2457,7 @@ status_t MPEG4Extractor::updateAudioTrackInfoFromESDS_MPEG4Audio(
     }
 
     mLastTrack->meta->setInt32(kKeySampleRate, sampleRate);
+    mLastTrack->meta->setInt32(kKeyAACProfile, objectType);
 
     int32_t prevChannelCount;
     CHECK(mLastTrack->meta->findInt32(kKeyChannelCount, &prevChannelCount));
@@ -2386,6 +2502,11 @@ MPEG4Source::MPEG4Source(
       mBuffer(NULL),
       mWantsNALFragments(false),
       mSrcBuffer(NULL) {
+      #ifdef DOLBY_UDC
+      #if defined (DEBUG_LOG_DDP_DECODER_EXTRA)
+      ALOGE("@DDP MPEG4Source::MPEG4Source");
+      #endif
+      #endif //DOLBY_UDC
 
     mFormat->findInt32(kKeyCryptoMode, &mCryptoMode);
     mDefaultIVSize = 0;
@@ -3164,7 +3285,6 @@ status_t MPEG4Source::read(
 
                 return ERROR_IO;
             }
-
             CHECK(mBuffer != NULL);
             mBuffer->set_range(0, size);
             mBuffer->meta_data()->clear();
@@ -3597,6 +3717,9 @@ static bool LegacySniffMPEG4(
     }
 
     if (!memcmp(header, "ftyp3gp", 7) || !memcmp(header, "ftypmp42", 8)
+#ifdef QCOM_HARDWARE
+        || !memcmp(header, "ftyp3g2a", 8) || !memcmp(header, "ftyp3g2b", 8) || !memcmp(header, "ftyp3g2c", 8)
+#endif
         || !memcmp(header, "ftyp3gr6", 8) || !memcmp(header, "ftyp3gs6", 8)
         || !memcmp(header, "ftyp3ge6", 8) || !memcmp(header, "ftyp3gg6", 8)
         || !memcmp(header, "ftypisom", 8) || !memcmp(header, "ftypM4V ", 8)

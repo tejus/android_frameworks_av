@@ -1,6 +1,9 @@
 /*
  * Copyright (C) 2009 The Android Open Source Project
  *
+ * Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
+ * Not a Contribution
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -48,6 +51,7 @@ enum {
     kKeyChannelCount      = '#chn',  // int32_t
     kKeyChannelMask       = 'chnm',  // int32_t
     kKeySampleRate        = 'srte',  // int32_t (audio sampling rate Hz)
+    kKeyExtSampleRate     = 'exsr',  // int32_t (extenstion audio sampling rate Hz)
     kKeyFrameRate         = 'frmR',  // int32_t (video frame rate fps)
     kKeyBitRate           = 'brte',  // int32_t (bps)
     kKeyESDS              = 'esds',  // raw data
@@ -161,6 +165,9 @@ enum {
     kKeyCryptoDefaultIVSize = 'cryS',  // int32_t
 
     kKeyPssh              = 'pssh',  // raw data
+#ifdef QCOM_HARDWARE
+    kKeyTunnelException   = 'Ntnl', // not tunnel
+#endif
 };
 
 enum {

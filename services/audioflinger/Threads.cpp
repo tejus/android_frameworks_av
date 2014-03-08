@@ -1,5 +1,6 @@
 /*
-**
+** Copyright (c) 2013, The Linux Foundation. All rights reserved.
+** Not a Contribution.
 ** Copyright 2012, The Android Open Source Project
 **
 ** Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +14,24 @@
 ** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 ** See the License for the specific language governing permissions and
 ** limitations under the License.
+**
+** This file was modified by DTS, Inc. The portions of the
+** code that are surrounded by "DTS..." are copyrighted and
+** licensed separately, as follows:
+**
+**  (C) 2013 DTS, Inc.
+**
+** Licensed under the Apache License, Version 2.0 (the "License");
+** you may not use this file except in compliance with the License.
+** You may obtain a copy of the License at
+**
+**    http://www.apache.org/licenses/LICENSE-2.0
+**
+** Unless required by applicable law or agreed to in writing, software
+** distributed under the License is distributed on an "AS IS" BASIS,
+** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+** See the License for the specific language governing permissions and
+** limitations under the License
 */
 
 
@@ -64,6 +83,10 @@
 #include <cpustats/ThreadCpuUsage.h>
 #endif
 
+#ifdef SRS_PROCESSING
+#include "postpro_patch.h"
+#endif
+
 // ----------------------------------------------------------------------------
 
 // Note: the following macro is used for extremely verbose logging message.  In
@@ -79,6 +102,11 @@
 #define ALOGVV(a...) do { } while(0)
 #endif
 
+#ifdef QCOM_DIRECTTRACK
+#define DIRECT_TRACK_EOS 1
+#define DIRECT_TRACK_HW_FAIL 6
+static const char lockName[] = "DirectTrack";
+#endif
 namespace android {
 
 // retry counts for buffer fill timeout
@@ -135,12 +163,12 @@ static const int kPriorityFastMixer = 3;
 
 // IAudioFlinger::createTrack() reports back to client the total size of shared memory area
 // for the track.  The client then sub-divides this into smaller buffers for its use.
-// Currently the client uses double-buffering by default, but doesn't tell us about that.
-// So for now we just assume that client is double-buffered.
-// FIXME It would be better for client to tell AudioFlinger whether it wants double-buffering or
-// N-buffering, so AudioFlinger could allocate the right amount of memory.
+// Currently the client uses N-buffering by default, but doesn't tell us about the value of N.
+// So for now we just assume that client is double-buffered for fast tracks.
+// FIXME It would be better for client to tell AudioFlinger the value of N,
+// so AudioFlinger could allocate the right amount of memory.
 // See the client's minBufCount and mNotificationFramesAct calculations for details.
-static const int kFastTrackMultiplier = 1;
+static const int kFastTrackMultiplier = 2;
 
 // ----------------------------------------------------------------------------
 
@@ -340,6 +368,13 @@ status_t AudioFlinger::ThreadBase::setParameters(const String8& keyValuePairs)
     }
     return status;
 }
+
+#ifdef QCOM_DIRECTTRACK
+void AudioFlinger::ThreadBase::effectConfigChanged() {
+    ALOGV("New effect is being added to LPA chain, Notifying LPA Direct Track");
+    mAudioFlinger->audioConfigChanged_l(AudioSystem::EFFECT_CONFIG_CHANGED, 0, NULL);
+}
+#endif
 
 void AudioFlinger::ThreadBase::sendIoConfigEvent(int event, int param)
 {
@@ -794,6 +829,21 @@ sp<AudioFlinger::EffectHandle> AudioFlinger::ThreadBase::createEffect_l(
             addEffectChain_l(chain);
             chain->setStrategy(getStrategyForSession_l(sessionId));
             chainCreated = true;
+#ifdef QCOM_DIRECTTRACK
+            if(sessionId == mAudioFlinger->mLPASessionId) {
+                // Clear reference to previous effect chain if any
+                if(mAudioFlinger->mLPAEffectChain.get()) {
+                    mAudioFlinger->mLPAEffectChain.clear();
+                }
+                ALOGV("New EffectChain is created for LPA session ID %d", sessionId);
+                mAudioFlinger->mLPAEffectChain = chain;
+                chain->setLPAFlag(true);
+                // For LPA, the volume will be applied in DSP. No need for volume
+                // control in the Effect chain, so setting it to unity.
+                uint32_t volume = 0x1000000; // Equals to 1.0 in 8.24 format
+                chain->setVolume_l(&volume,&volume);
+            }
+#endif
         } else {
             effect = chain->getEffectFromDesc_l(desc);
         }
@@ -822,7 +872,11 @@ sp<AudioFlinger::EffectHandle> AudioFlinger::ThreadBase::createEffect_l(
             }
             effectCreated = true;
 
+#ifdef QCOM_DIRECTTRACK
+            effect->setDevice(mAudioFlinger->mLPASessionId == sessionId ? mAudioFlinger->mDirectDevice:mOutDevice);
+#else
             effect->setDevice(mOutDevice);
+#endif
             effect->setDevice(mInDevice);
             effect->setMode(mAudioFlinger->getMode());
             effect->setAudioSource(mAudioSource);
@@ -937,8 +991,20 @@ void AudioFlinger::ThreadBase::lockEffectChains_l(
         Vector< sp<AudioFlinger::EffectChain> >& effectChains)
 {
     effectChains = mEffectChains;
+#ifdef QCOM_DIRECTTRACK
+    mAudioFlinger->mAllChainsLocked = true;
+#endif
     for (size_t i = 0; i < mEffectChains.size(); i++) {
-        mEffectChains[i]->lock();
+#ifdef QCOM_DIRECTTRACK
+        if (mEffectChains[i] != mAudioFlinger->mLPAEffectChain) {
+#else
+            mEffectChains[i]->lock();
+#endif
+#ifdef QCOM_DIRECTTRACK
+        } else {
+            mAudioFlinger-> mAllChainsLocked = false;
+        }
+#endif
     }
 }
 
@@ -946,7 +1012,10 @@ void AudioFlinger::ThreadBase::unlockEffectChains(
         const Vector< sp<AudioFlinger::EffectChain> >& effectChains)
 {
     for (size_t i = 0; i < effectChains.size(); i++) {
-        effectChains[i]->unlock();
+#ifdef QCOM_DIRECTTRACK
+        if (mAudioFlinger->mAllChainsLocked || effectChains[i] != mAudioFlinger->mLPAEffectChain)
+#endif
+            effectChains[i]->unlock();
     }
 }
 
@@ -1017,6 +1086,9 @@ AudioFlinger::PlaybackThread::PlaybackThread(const sp<AudioFlinger>& audioFlinge
         mDrainSequence(0),
         mSignalPending(false),
         mScreenState(AudioFlinger::mScreenState),
+#ifdef QCOM_DIRECTTRACK
+        mOutputFlags(AUDIO_OUTPUT_FLAG_NONE),
+#endif
         // index 0 is reserved for normal mixer's submix
         mFastTrackAvailMask(((1 << FastMixerState::kMaxFastTracks) - 1) & ~1),
         // mLatchD, mLatchQ,
@@ -1210,7 +1282,7 @@ sp<AudioFlinger::PlaybackThread::Track> AudioFlinger::PlaybackThread::createTrac
               (
                 (tid != -1) &&
                 ((frameCount == 0) ||
-                (frameCount >= (mFrameCount * kFastTrackMultiplier)))
+                (frameCount >= mFrameCount))
               )
             ) &&
             // PCM data
@@ -1254,8 +1326,10 @@ sp<AudioFlinger::PlaybackThread::Track> AudioFlinger::PlaybackThread::createTrac
 #else
         uint32_t latencyMs = mOutput->stream->get_latency(mOutput->stream);
 #endif
-
-        uint32_t minBufCount = latencyMs / ((1000 * mNormalFrameCount) / mSampleRate);
+        uint32_t minBufCount = 0;
+        if (mSampleRate) {
+            minBufCount = latencyMs / ((1000 * mNormalFrameCount) / mSampleRate);
+        }
         if (minBufCount < 2) {
             minBufCount = 2;
         }
@@ -1267,7 +1341,12 @@ sp<AudioFlinger::PlaybackThread::Track> AudioFlinger::PlaybackThread::createTrac
     }
 
     if (mType == DIRECT) {
+#ifdef QCOM_HARDWARE
+        if (((format & AUDIO_FORMAT_MAIN_MASK) == AUDIO_FORMAT_PCM) ||
+                audio_is_compress_voip_format(format)) {
+#else
         if ((format & AUDIO_FORMAT_MAIN_MASK) == AUDIO_FORMAT_PCM) {
+#endif
             if (sampleRate != mSampleRate || format != mFormat || channelMask != mChannelMask) {
                 ALOGE("createTrack_l() Bad parameter: sampleRate %u format %d, channelMask 0x%08x "
                         "for output %p with format %d",
@@ -1426,6 +1505,13 @@ float AudioFlinger::PlaybackThread::streamVolume(audio_stream_type_t stream) con
 {
     Mutex::Autolock _l(mLock);
     return mStreamTypes[stream].volume;
+}
+
+void AudioFlinger::PlaybackThread::setPostPro()
+{
+    Mutex::Autolock _l(mLock);
+    if (mType == OFFLOAD)
+        broadcast_l();
 }
 
 // addTrack_l() must be called with ThreadBase::mLock held
@@ -2179,6 +2265,18 @@ bool AudioFlinger::PlaybackThread::threadLoop()
 
     acquireWakeLock();
 
+#ifdef SRS_PROCESSING
+    if (mType == MIXER) {
+        POSTPRO_PATCH_OUTPROC_PLAY_INIT(this, myName);
+    } else if (mType == DUPLICATING) {
+        POSTPRO_PATCH_OUTPROC_DUPE_INIT(this, myName);
+    } else if (mType == OFFLOAD) {
+        POSTPRO_PATCH_OUTPROC_DIRECT_INIT(this, myName);
+    } else if (mType == DIRECT) {
+        POSTPRO_PATCH_OUTPROC_DIRECT_INIT(this, myName);
+    }
+#endif
+
     // mNBLogWriter->log can only be called while thread mutex mLock is held.
     // So if you need to log when mutex is unlocked, set logString to a non-NULL string,
     // and then that string will be logged at the next convenient opportunity.
@@ -2319,8 +2417,14 @@ bool AudioFlinger::PlaybackThread::threadLoop()
             // only process effects if we're going to write
             if (sleepTime == 0 && mType != OFFLOAD) {
                 for (size_t i = 0; i < effectChains.size(); i ++) {
-                    effectChains[i]->process_l();
-                }
+#ifdef QCOM_DIRECTTRACK
+                    if (effectChains[i] != mAudioFlinger->mLPAEffectChain) {
+#endif
+                        effectChains[i]->process_l();
+#ifdef QCOM_DIRECTTRACK
+                  }
+#endif
+               }
             }
         }
         // Process effect chains for offloaded thread even if no audio
@@ -2331,6 +2435,13 @@ bool AudioFlinger::PlaybackThread::threadLoop()
             for (size_t i = 0; i < effectChains.size(); i ++) {
                 effectChains[i]->process_l();
             }
+#ifdef SRS_PROCESSING
+            // Offload thread
+            if (mType == OFFLOAD) {
+                char buffer[2];
+                POSTPRO_PATCH_OUTPROC_DIRECT_SAMPLES(this, AUDIO_FORMAT_PCM_16_BIT, (int16_t *) buffer, 2, 48000, 2);
+            }
+#endif
         }
 
         // enable changes in effect chain
@@ -2339,6 +2450,17 @@ bool AudioFlinger::PlaybackThread::threadLoop()
         if (!waitingAsyncCallback()) {
             // sleepTime == 0 means we must write to audio hardware
             if (sleepTime == 0) {
+#ifdef SRS_PROCESSING
+                if (mType == MIXER) {
+                    POSTPRO_PATCH_OUTPROC_PLAY_SAMPLES(this, mFormat, mMixBuffer, mixBufferSize, mSampleRate, mChannelCount);
+                } else if (mType == DUPLICATING) {
+                    POSTPRO_PATCH_OUTPROC_DUPE_SAMPLES(this, mFormat, mMixBuffer, mixBufferSize, mSampleRate, mChannelCount);
+                } /* else if (mType == OFFLOAD) {
+                    POSTPRO_PATCH_OUTPROC_DIRECT_SAMPLES(this, mFormat, mMixBuffer, mixBufferSize, mSampleRate, mChannelCount);
+                } else if (mType == DIRECT) {
+                    POSTPRO_PATCH_OUTPROC_DIRECT_SAMPLES(this, mFormat, mMixBuffer, mixBufferSize, mSampleRate, mChannelCount);
+                } */
+#endif
                 if (mBytesRemaining) {
                     ssize_t ret = threadLoop_write();
                     if (ret < 0) {
@@ -2399,7 +2521,17 @@ if (mType == MIXER) {
             mOutput->stream->common.standby(&mOutput->stream->common);
         }
     }
-
+#ifdef SRS_PROCESSING
+    if (mType == MIXER) {
+        POSTPRO_PATCH_OUTPROC_PLAY_EXIT(this, myName);
+    } else if (mType == DUPLICATING) {
+        POSTPRO_PATCH_OUTPROC_DUPE_EXIT(this, myName);
+    } else if (mType == OFFLOAD) {
+        POSTPRO_PATCH_OUTPROC_DIRECT_EXIT(this, myName);
+    } else if (mType == DIRECT) {
+        POSTPRO_PATCH_OUTPROC_DIRECT_EXIT(this, myName);
+    }
+#endif
     releaseWakeLock();
     mWakeLockUids.clear();
     mActiveTracksGeneration++;
@@ -2641,7 +2773,10 @@ uint32_t AudioFlinger::MixerThread::correctLatency_l(uint32_t latency) const
 {
     if (mFastMixer != NULL) {
         MonoPipe *pipe = (MonoPipe *)mPipeSink.get();
-        latency += (pipe->getAvgFrames() * 1000) / mSampleRate;
+        if(mSampleRate)
+            latency += (pipe->getAvgFrames() * 1000) / mSampleRate;
+        else
+            ALOGW("SampleRate is 0");
     }
     return latency;
 }
@@ -3031,7 +3166,12 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::MixerThread::prepareTrac
             desiredFrames = mNormalFrameCount;
         } else {
             // +1 for rounding and +1 for additional sample needed for interpolation
-            desiredFrames = (mNormalFrameCount * sr) / mSampleRate + 1 + 1;
+            if (mSampleRate) {
+                desiredFrames = (mNormalFrameCount * sr) / mSampleRate + 1 + 1;
+            } else {
+                desiredFrames = 2;
+                ALOGW("SampleRate is 0");
+            }
             // add frames already consumed but not yet released by the resampler
             // because cblk->framesReady() will include these frames
             desiredFrames += mAudioMixer->getUnreleasedFrames(track->name());
@@ -3363,7 +3503,9 @@ bool AudioFlinger::MixerThread::checkForNewParameters_l()
         String8 keyValuePair = mNewParameters[0];
         AudioParameter param = AudioParameter(keyValuePair);
         int value;
-
+#ifdef SRS_PROCESSING
+        POSTPRO_PATCH_OUTPROC_PLAY_ROUTE(this, param, value);
+#endif
         if (param.getInt(String8(AudioParameter::keySamplingRate), value) == NO_ERROR) {
             reconfig = true;
         }
@@ -3669,7 +3811,8 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::DirectOutputThread::prep
                 size_t audioHALFrames = (latency_l() * mSampleRate) / 1000;
                 size_t framesWritten = mBytesWritten / mFrameSize;
                 if (mStandby || !last ||
-                        track->presentationComplete(framesWritten, audioHALFrames)) {
+                        track->presentationComplete(framesWritten, audioHALFrames) ||
+                        track->isTerminated()) {
                     if (track->isStopped()) {
                         track->reset();
                     }
@@ -3682,8 +3825,6 @@ AudioFlinger::PlaybackThread::mixer_state AudioFlinger::DirectOutputThread::prep
                 if (--(track->mRetryCount) <= 0) {
                     ALOGV("BUFFER TIMEOUT: remove(%d) from active list", track->name());
                     tracksToRemove->add(track);
-                    // indicate to client process that the track was disabled because of underrun;
-                    // it will then automatically call start() when data is available
                     android_atomic_or(CBLK_DISABLED, &cblk->mFlags);
                 } else if (last) {
                     mixerStatus = MIXER_TRACKS_ENABLED;
@@ -3730,7 +3871,12 @@ void AudioFlinger::DirectOutputThread::threadLoop_sleepTime()
         } else {
             sleepTime = idleSleepTime;
         }
+#if defined(QCOM_HARDWARE) && !defined(QCOM_DIRECTTRACK)
+    } else if (mBytesWritten != 0 && (audio_is_linear_pcm(mFormat) ||
+                audio_is_compress_voip_format(mFormat))) {
+#else
     } else if (mBytesWritten != 0 && audio_is_linear_pcm(mFormat)) {
+#endif
         memset(mMixBuffer, 0, mFrameCount * mFrameSize);
         sleepTime = 0;
     }
@@ -3758,6 +3904,10 @@ bool AudioFlinger::DirectOutputThread::checkForNewParameters_l()
         String8 keyValuePair = mNewParameters[0];
         AudioParameter param = AudioParameter(keyValuePair);
         int value;
+
+#ifdef SRS_PROCESSING
+        POSTPRO_PATCH_OUTPROC_PLAY_ROUTE(this, param, value);
+#endif
 
         if (param.getInt(String8(AudioParameter::keyFrameCount), value) == NO_ERROR) {
             // do not accept frame count changes if tracks are open as the track buffer
@@ -3870,7 +4020,12 @@ bool AudioFlinger::AsyncCallbackThread::threadLoop()
 
         {
             Mutex::Autolock _l(mLock);
-            mWaitWorkCV.wait(mLock);
+            while (!((mWriteAckSequence & 1) ||
+                            (mDrainSequence & 1) ||
+                            exitPending())) {
+                mWaitWorkCV.wait(mLock);
+            }
+
             if (exitPending()) {
                 break;
             }
@@ -4199,6 +4354,9 @@ void AudioFlinger::OffloadThread::flushHw_l()
     mBytesRemaining = 0;
     mPausedWriteLength = 0;
     mPausedBytesRemaining = 0;
+    // Treat flush as moving OffloadThread state back to Idle.
+    mHwPaused = false;
+
     if (mUseAsyncWrite) {
         // discard any pending drain or write ack by incrementing sequence
         mWriteAckSequence = (mWriteAckSequence + 2) & ~1;
@@ -4292,7 +4450,10 @@ void AudioFlinger::DuplicatingThread::addOutputTrack(MixerThread *thread)
 {
     Mutex::Autolock _l(mLock);
     // FIXME explain this formula
-    size_t frameCount = (3 * mNormalFrameCount * mSampleRate) / thread->sampleRate();
+    int sampleRate = thread->sampleRate();
+    size_t frameCount = 0;
+    if (sampleRate)
+        frameCount = (3 * mNormalFrameCount * mSampleRate) / thread->sampleRate();
     OutputTrack *outputTrack = new OutputTrack(thread,
                                             this,
                                             mSampleRate,
@@ -4390,7 +4551,7 @@ AudioFlinger::RecordThread::RecordThread(const sp<AudioFlinger>& audioFlinger,
     ThreadBase(audioFlinger, id, outDevice, inDevice, RECORD),
     mInput(input), mResampler(NULL), mRsmpOutBuffer(NULL), mRsmpInBuffer(NULL),
     // mRsmpInIndex and mBufferSize set by readInputParameters()
-    mReqChannelCount(popcount(channelMask)),
+    mReqChannelCount(getInputChannelCount(channelMask)),
     mReqSampleRate(sampleRate)
     // mBytesRead is only meaningful while active, and so is cleared in start()
     // (but might be better to also clear here for dump?)
@@ -4437,6 +4598,10 @@ bool AudioFlinger::RecordThread::threadLoop()
         activeTrack = mActiveTrack;
         acquireWakeLock_l(activeTrack != 0 ? activeTrack->uid() : -1);
     }
+
+#ifdef SRS_PROCESSING
+    POSTPRO_PATCH_INPROC_INIT(this, gettid(), mFormat);
+#endif
 
     // used to verify we've read at least once before evaluating how many bytes were read
     bool readOnce = false;
@@ -4527,7 +4692,13 @@ bool AudioFlinger::RecordThread::threadLoop()
                                 framesIn = framesOut;
                             mRsmpInIndex += framesIn;
                             framesOut -= framesIn;
+#if defined(QCOM_HARDWARE) && !defined(QCOM_DIRECTTRACK)
+                            if (mChannelCount == mReqChannelCount ||
+                                    audio_is_compress_capture_format(mFormat) ||
+                                    audio_is_compress_voip_format(mFormat)) {
+#else
                             if (mChannelCount == mReqChannelCount) {
+#endif
                                 memcpy(dst, src, framesIn * mFrameSize);
                             } else {
                                 if (mChannelCount == 1) {
@@ -4539,8 +4710,29 @@ bool AudioFlinger::RecordThread::threadLoop()
                                 }
                             }
                         }
-                        if (framesOut && mFrameCount == mRsmpInIndex) {
+                        if (framesOut && (mFrameCount == mRsmpInIndex)) {
                             void *readInto;
+#ifdef QCOM_DIRECTTRACK
+                            int InputBytes;
+                            /*Fix me: How does framesOut become 0 in this condition */
+                            if (( framesOut != mFrameCount) &&
+                                ((mFormat != AUDIO_FORMAT_PCM_16_BIT)&&
+                                (!(mActiveTrack->mFlags & TRACK_VOICE_COMMUNICATION)))) {
+                                     readInto = buffer.raw;
+                                     InputBytes = buffer.frameCount * mFrameSize;
+                             } else if (framesOut == mFrameCount &&
+                                       (mChannelCount == mReqChannelCount ||
+                                       ((mFormat != AUDIO_FORMAT_PCM_16_BIT) &&
+                                       (!(mActiveTrack->mFlags & TRACK_VOICE_COMMUNICATION))))) {
+                                     readInto = buffer.raw;
+                                     InputBytes = mBufferSize;
+                                     framesOut = 0;
+                             } else {
+                                     readInto = mRsmpInBuffer;
+                                     mRsmpInIndex = 0;
+                                     InputBytes = mBufferSize;
+                             }
+#else
                             if (framesOut == mFrameCount && mChannelCount == mReqChannelCount) {
                                 readInto = buffer.raw;
                                 framesOut = 0;
@@ -4548,8 +4740,16 @@ bool AudioFlinger::RecordThread::threadLoop()
                                 readInto = mRsmpInBuffer;
                                 mRsmpInIndex = 0;
                             }
+#endif
                             mBytesRead = mInput->stream->read(mInput->stream, readInto,
+#ifdef QCOM_DIRECTTRACK
+                                    InputBytes);
+#else
                                     mBufferSize);
+#endif
+#ifdef SRS_PROCESSING
+                            POSTPRO_PATCH_INPROC_SAMPLES(this, mFormat, readInto, mBytesRead, mSampleRate, mChannelCount);
+#endif
                             if (mBytesRead <= 0) {
                                 if ((mBytesRead < 0) && (mActiveTrack->mState == TrackBase::ACTIVE))
                                 {
@@ -4651,6 +4851,10 @@ bool AudioFlinger::RecordThread::threadLoop()
         mStartStopCond.broadcast();
     }
 
+#ifdef SRS_PROCESSING
+    POSTPRO_PATCH_INPROC_EXIT(this, gettid(), mFormat);
+#endif
+
     releaseWakeLock();
 
     ALOGV("RecordThread %p exiting", this);
@@ -4697,7 +4901,7 @@ sp<AudioFlinger::RecordThread::RecordTrack>  AudioFlinger::RecordThread::createR
             (
                 (tid != -1) &&
                 ((frameCount == 0) ||
-                (frameCount >= (mFrameCount * kFastTrackMultiplier)))
+                (frameCount >= mFrameCount))
             ) &&
             // FIXME when record supports non-PCM data, also check for audio_is_linear_pcm(format)
             // mono or stereo
@@ -4730,7 +4934,10 @@ sp<AudioFlinger::RecordThread::RecordTrack>  AudioFlinger::RecordThread::createR
         // If you change this calculation, also review the start threshold which is related.
         uint32_t latencyMs = 50; // FIXME mInput->stream->get_latency(mInput->stream);
         size_t mNormalFrameCount = 2048; // FIXME
-        uint32_t minBufCount = latencyMs / ((1000 * mNormalFrameCount) / mSampleRate);
+        uint32_t minBufCount = 0;
+        if (mSampleRate) {
+            minBufCount = latencyMs / ((1000 * mNormalFrameCount) / mSampleRate);
+        }
         if (minBufCount < 2) {
             minBufCount = 2;
         }
@@ -4747,12 +4954,16 @@ sp<AudioFlinger::RecordThread::RecordTrack>  AudioFlinger::RecordThread::createR
         Mutex::Autolock _l(mLock);
 
         track = new RecordTrack(this, client, sampleRate,
+#ifdef QCOM_DIRECTTRACK
+                      format, channelMask, frameCount, *flags, sessionId, uid);
+#else
                       format, channelMask, frameCount, sessionId, uid);
+#endif
 
         if (track->getCblk() == 0) {
             ALOGE("createRecordTrack_l() no control block");
             lStatus = NO_MEMORY;
-            track.clear();
+            // track must be cleared from the caller as the caller has the AF lock
             goto Exit;
         }
         mTracks.add(track);
@@ -5025,6 +5236,10 @@ status_t AudioFlinger::RecordThread::getNextBuffer(AudioBufferProvider::Buffer* 
 
     if (framesReady == 0) {
         mBytesRead = mInput->stream->read(mInput->stream, mRsmpInBuffer, mBufferSize);
+
+#ifdef SRS_PROCESSING
+        POSTPRO_PATCH_INPROC_SAMPLES(this, mFormat, mRsmpInBuffer, mBytesRead, mSampleRate, mChannelCount);
+#endif
         if (mBytesRead <= 0) {
             if ((mBytesRead < 0) && (mActiveTrack->mState == TrackBase::ACTIVE)) {
                 ALOGE("RecordThread::getNextBuffer() Error reading audio input");
@@ -5075,6 +5290,9 @@ bool AudioFlinger::RecordThread::checkForNewParameters_l()
         uint32_t reqSamplingRate = mReqSampleRate;
         uint32_t reqChannelCount = mReqChannelCount;
 
+#ifdef SRS_PROCESSING
+        POSTPRO_PATCH_INPROC_ROUTE(this, param, value);
+#endif
         if (param.getInt(String8(AudioParameter::keySamplingRate), value) == NO_ERROR) {
             reqSamplingRate = value;
             reconfig = true;
@@ -5088,7 +5306,7 @@ bool AudioFlinger::RecordThread::checkForNewParameters_l()
             }
         }
         if (param.getInt(String8(AudioParameter::keyChannels), value) == NO_ERROR) {
-            reqChannelCount = popcount(value);
+            reqChannelCount = getInputChannelCount(value);
             reconfig = true;
         }
         if (param.getInt(String8(AudioParameter::keyFrameCount), value) == NO_ERROR) {
@@ -5152,7 +5370,7 @@ bool AudioFlinger::RecordThread::checkForNewParameters_l()
                     reqFormat == AUDIO_FORMAT_PCM_16_BIT &&
                     (mInput->stream->common.get_sample_rate(&mInput->stream->common)
                             <= (2 * reqSamplingRate)) &&
-                    popcount(mInput->stream->common.get_channels(&mInput->stream->common))
+                    getInputChannelCount(mInput->stream->common.get_channels(&mInput->stream->common))
                             <= FCC_2 &&
                     (reqChannelCount <= FCC_2)) {
                     status = NO_ERROR;
@@ -5221,11 +5439,19 @@ void AudioFlinger::RecordThread::readInputParameters()
 
     mSampleRate = mInput->stream->common.get_sample_rate(&mInput->stream->common);
     mChannelMask = mInput->stream->common.get_channels(&mInput->stream->common);
-    mChannelCount = popcount(mChannelMask);
+    mChannelCount = (uint16_t)getInputChannelCount(mChannelMask);
     mFormat = mInput->stream->common.get_format(&mInput->stream->common);
+#ifdef QCOM_HARDWARE
+    if (mFormat != AUDIO_FORMAT_PCM_16_BIT &&
+            !audio_is_compress_voip_format(mFormat) &&
+            !audio_is_compress_capture_format(mFormat)) {
+        ALOGE("HAL format %d not supported", mFormat);
+    }
+#else
     if (mFormat != AUDIO_FORMAT_PCM_16_BIT) {
         ALOGE("HAL format %d not supported; must be AUDIO_FORMAT_PCM_16_BIT", mFormat);
     }
+#endif
     mFrameSize = audio_stream_frame_size(&mInput->stream->common);
     mBufferSize = mInput->stream->common.get_buffer_size(&mInput->stream->common);
     mFrameCount = mBufferSize / mFrameSize;
@@ -5344,5 +5570,303 @@ size_t AudioFlinger::RecordThread::removeEffectChain_l(const sp<EffectChain>& ch
     }
     return 0;
 }
+
+#ifdef QCOM_DIRECTTRACK
+// ----------------------------------------------------------------------------
+
+AudioFlinger::DirectAudioTrack::DirectAudioTrack(const sp<AudioFlinger>& audioFlinger,
+                                                 int output, AudioSessionDescriptor *outputDesc,
+                                                 IDirectTrackClient* client, audio_output_flags_t outflag)
+    : BnDirectTrack(), mIsPaused(false), mAudioFlinger(audioFlinger), mOutput(output), mOutputDesc(outputDesc),
+      mClient(client), mEffectConfigChanged(false), mKillEffectsThread(false), mFlag(outflag),
+      mEffectsThreadScratchBuffer(NULL)
+{
+    if (mFlag & AUDIO_OUTPUT_FLAG_LPA) {
+        ALOGV("create effects thread for LPA");
+        createEffectThread();
+        allocateBufPool();
+    } else if (mFlag & AUDIO_OUTPUT_FLAG_TUNNEL) {
+        ALOGV("create effects thread for TUNNEL");
+        createEffectThread();
+    }
+    outputDesc->mVolumeScale = 1.0;
+    mDeathRecipient = new PMDeathRecipient(this);
+    acquireWakeLock();
+}
+
+void AudioFlinger::DirectAudioTrack::signalEffect() {
+    if (mFlag & AUDIO_OUTPUT_FLAG_LPA){
+        mEffectConfigChanged = true;
+        mEffectCv.signal();
+    }
+}
+
+AudioFlinger::DirectAudioTrack::~DirectAudioTrack() {
+    if (mFlag & AUDIO_OUTPUT_FLAG_LPA) {
+        requestAndWaitForEffectsThreadExit();
+        mAudioFlinger->deleteEffectSession();
+        deallocateBufPool();
+    } else if (mFlag & AUDIO_OUTPUT_FLAG_TUNNEL) {
+        requestAndWaitForEffectsThreadExit();
+        mAudioFlinger->deleteEffectSession();
+    }
+    AudioSystem::releaseOutput(mOutput);
+    releaseWakeLock();
+
+    {
+        Mutex::Autolock _l(pmLock);
+        if (mPowerManager != 0) {
+            sp<IBinder> binder = mPowerManager->asBinder();
+            binder->unlinkToDeath(mDeathRecipient);
+        }
+    }
+}
+
+status_t AudioFlinger::DirectAudioTrack::start() {
+    AudioSystem::startOutput(mOutput, (audio_stream_type_t)mOutputDesc->mStreamType);
+    if(mIsPaused) {
+        mIsPaused = false;
+        mOutputDesc->stream->start(mOutputDesc->stream);
+    }
+    mOutputDesc->mActive = true;
+    mOutputDesc->stream->set_volume(mOutputDesc->stream,
+                                    mOutputDesc->mVolumeLeft * mOutputDesc->mVolumeScale,
+                                    mOutputDesc->mVolumeRight* mOutputDesc->mVolumeScale);
+    return NO_ERROR;
+}
+
+void AudioFlinger::DirectAudioTrack::stop() {
+    ALOGV("DirectAudioTrack::stop");
+    mOutputDesc->mActive = false;
+    mOutputDesc->stream->stop(mOutputDesc->stream);
+    AudioSystem::stopOutput(mOutput, (audio_stream_type_t)mOutputDesc->mStreamType);
+}
+
+void AudioFlinger::DirectAudioTrack::pause() {
+    if(!mIsPaused) {
+        mIsPaused = true;
+        mOutputDesc->stream->pause(mOutputDesc->stream);
+        mOutputDesc->mActive = false;
+        AudioSystem::stopOutput(mOutput, (audio_stream_type_t)mOutputDesc->mStreamType);
+    }
+}
+
+ssize_t AudioFlinger::DirectAudioTrack::write(const void *buffer, size_t size) {
+    ALOGV("Writing to AudioSessionOut");
+    int isAvail = 0;
+    mOutputDesc->stream->is_buffer_available(mOutputDesc->stream, &isAvail);
+    if (!isAvail) {
+        return 0;
+    }
+
+    if (mFlag & AUDIO_OUTPUT_FLAG_LPA) {
+        mEffectLock.lock();
+        List<BufferInfo>::iterator it = mEffectsPool.begin();
+        BufferInfo buf = *it;
+        mEffectsPool.erase(it);
+        memcpy((char *) buf.localBuf, (char *)buffer, size);
+        buf.bytesToWrite = size;
+        mEffectsPool.push_back(buf);
+        mAudioFlinger->applyEffectsOn(static_cast<void *>(this),
+            (int16_t*)buf.localBuf, (int16_t*)buffer, (int)size, true);
+        mEffectLock.unlock();
+    }
+    ALOGV("out of Writing to AudioSessionOut");
+    return mOutputDesc->stream->write(mOutputDesc->stream, buffer, size);
+}
+
+void AudioFlinger::DirectAudioTrack::flush() {
+    if (mFlag & AUDIO_OUTPUT_FLAG_LPA) {
+        mEffectLock.lock();
+        mEffectsPool.clear();
+        mEffectsPool = mBufPool;
+        mEffectLock.unlock();
+    }
+    mOutputDesc->stream->flush(mOutputDesc->stream);
+}
+
+void AudioFlinger::DirectAudioTrack::mute(bool muted) {
+}
+
+void AudioFlinger::DirectAudioTrack::setVolume(float left, float right) {
+    ALOGV("DirectAudioTrack::setVolume left: %f, right: %f", left, right);
+    if(mOutputDesc) {
+        mOutputDesc->mVolumeLeft = left;
+        mOutputDesc->mVolumeRight = right;
+        if(mOutputDesc->mActive &&  mOutputDesc->stream) {
+            mOutputDesc->stream->set_volume(mOutputDesc->stream,
+                                    left * mOutputDesc->mVolumeScale,
+                                    right* mOutputDesc->mVolumeScale);
+        } else {
+            ALOGD("stream is not active, so cache and send when stream is active");
+        }
+    } else {
+        ALOGD("output descriptor is not valid to set the volume");
+    }
+}
+
+int64_t AudioFlinger::DirectAudioTrack::getTimeStamp() {
+    int64_t time;
+    mOutputDesc->stream->get_next_write_timestamp(mOutputDesc->stream, &time);
+    ALOGV("Timestamp %lld",time);
+    return time;
+}
+
+void AudioFlinger::DirectAudioTrack::postEOS(int64_t delayUs) {
+    if (delayUs == 0 ) {
+       ALOGV("Notify Audio Track of EOS event");
+       mClient->notify(DIRECT_TRACK_EOS);
+    } else {
+       ALOGV("Notify Audio Track of hardware failure event");
+       mClient->notify(DIRECT_TRACK_HW_FAIL);
+    }
+}
+
+void AudioFlinger::DirectAudioTrack::allocateBufPool() {
+    void *dsp_buf = NULL;
+    void *local_buf = NULL;
+
+    //1. get the ion buffer information
+    struct buf_info* buf = NULL;
+    mOutputDesc->stream->get_buffer_info(mOutputDesc->stream, &buf);
+    ALOGV("get buffer info %p",buf);
+    if (!buf) {
+        ALOGV("buffer is NULL");
+        return;
+    }
+    int nSize = buf->bufsize;
+    int bufferCount = buf->nBufs;
+
+    //2. allocate the buffer pool, allocate local buffers
+    for (int i = 0; i < bufferCount; i++) {
+        dsp_buf = (void *)buf->buffers[i];
+        local_buf = malloc(nSize);
+        memset(local_buf, 0, nSize);
+        // Store this information for internal mapping / maintanence
+        BufferInfo buf(local_buf, dsp_buf, nSize);
+        buf.bytesToWrite = 0;
+        mBufPool.push_back(buf);
+        mEffectsPool.push_back(buf);
+
+        ALOGV("The MEM that is allocated buffer is %x, size %d",(unsigned int)dsp_buf,nSize);
+    }
+
+    mEffectsThreadScratchBuffer = malloc(nSize);
+    ALOGV("effectsThreadScratchBuffer = %x",mEffectsThreadScratchBuffer);
+
+    free(buf);
+}
+
+void AudioFlinger::DirectAudioTrack::deallocateBufPool() {
+
+    //1. Deallocate the local memory
+    //2. Remove all the buffers from bufpool
+    mEffectLock.lock();
+    while (!mBufPool.empty())  {
+        List<BufferInfo>::iterator it = mBufPool.begin();
+        BufferInfo &memBuffer = *it;
+        // free the local buffer corresponding to mem buffer
+        if (memBuffer.localBuf) {
+            free(memBuffer.localBuf);
+            memBuffer.localBuf = NULL;
+        }
+        ALOGV("Removing from bufpool");
+        mBufPool.erase(it);
+    }
+    mEffectsPool.clear();
+    mEffectLock.unlock();
+
+    free(mEffectsThreadScratchBuffer);
+    mEffectsThreadScratchBuffer = NULL;
+}
+
+status_t AudioFlinger::DirectAudioTrack::onTransact(
+    uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
+{
+    return BnDirectTrack::onTransact(code, data, reply, flags);
+}
+
+AudioFlinger::DirectAudioTrack::AudioFlingerDirectTrackClient::AudioFlingerDirectTrackClient(void *obj)
+{
+    ALOGV("AudioFlinger::DirectAudioTrack::AudioFlingerDirectTrackClient");
+    pBaseClass = (DirectAudioTrack*)obj;
+}
+
+void AudioFlinger::DirectAudioTrack::AudioFlingerDirectTrackClient::binderDied(const wp<IBinder>& who) {
+    pBaseClass->mAudioFlinger.clear();
+    ALOGW("AudioFlinger server died!");
+}
+
+void AudioFlinger::DirectAudioTrack::AudioFlingerDirectTrackClient
+     ::ioConfigChanged(int event, audio_io_handle_t ioHandle, const void *param2) {
+    ALOGV("ioConfigChanged() event %d", event);
+    if (event == AudioSystem::EFFECT_CONFIG_CHANGED) {
+        ALOGV("Received notification for change in effect module");
+        // Seek to current media time - flush the decoded buffers with the driver
+        pBaseClass->mEffectConfigChanged = true;
+        // Signal effects thread to re-apply effects
+        ALOGV("Signalling Effects Thread");
+        pBaseClass->mEffectCv.signal();
+
+    }
+    ALOGV("ioConfigChanged Out");
+}
+
+void AudioFlinger::DirectAudioTrack::acquireWakeLock()
+{
+    Mutex::Autolock _l(pmLock);
+
+    if (mPowerManager == 0) {
+        // use checkService() to avoid blocking if power service is not up yet
+        sp<IBinder> binder =
+            defaultServiceManager()->checkService(String16("power"));
+        if (binder == 0) {
+            ALOGW("Thread %s cannot connect to the power manager service", lockName);
+        } else {
+            mPowerManager = interface_cast<IPowerManager>(binder);
+            binder->linkToDeath(mDeathRecipient);
+        }
+    }
+    if (mPowerManager != 0 && mWakeLockToken == 0) {
+        sp<IBinder> binder = new BBinder();
+        status_t status = mPowerManager->acquireWakeLock(POWERMANAGER_PARTIAL_WAKE_LOCK,
+                                                         binder,
+                                                         String16(lockName),
+                                                         String16("media"));
+        if (status == NO_ERROR) {
+            mWakeLockToken = binder;
+        }
+        ALOGV("acquireWakeLock() status %d", status);
+    }
+}
+
+void AudioFlinger::DirectAudioTrack::releaseWakeLock()
+{
+   Mutex::Autolock _l(pmLock);
+
+    if (mWakeLockToken != 0) {
+        ALOGV("releaseWakeLock()");
+        if (mPowerManager != 0) {
+            mPowerManager->releaseWakeLock(mWakeLockToken, 0);
+        }
+        mWakeLockToken.clear();
+    }
+}
+
+void AudioFlinger::DirectAudioTrack::clearPowerManager()
+{
+    releaseWakeLock();
+    Mutex::Autolock _l(pmLock);
+    mPowerManager.clear();
+}
+
+void AudioFlinger::DirectAudioTrack::PMDeathRecipient::binderDied(const wp<IBinder>& who)
+{
+    parentClass->clearPowerManager();
+    ALOGW("power manager service died !!!");
+}
+
+// ----------------------------------------------------------------------------
+#endif
 
 }; // namespace android

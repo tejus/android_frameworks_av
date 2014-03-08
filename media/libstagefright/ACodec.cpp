@@ -32,6 +32,9 @@
 #include <media/stagefright/NativeWindowWrapper.h>
 #include <media/stagefright/OMXClient.h>
 #include <media/stagefright/OMXCodec.h>
+#ifdef QCOM_HARDWARE
+#include <media/stagefright/ExtendedCodec.h>
+#endif
 
 #include <media/hardware/HardwareAPI.h>
 
@@ -42,6 +45,9 @@
 #endif
 
 #include "include/avc_utils.h"
+#ifdef QCOM_HARDWARE
+#include "include/ExtendedUtils.h"
+#endif
 
 namespace android {
 
@@ -987,6 +993,10 @@ status_t ACodec::setComponentRole(
             "audio_decoder.amrnb", "audio_encoder.amrnb" },
         { MEDIA_MIMETYPE_AUDIO_AMR_WB,
             "audio_decoder.amrwb", "audio_encoder.amrwb" },
+#ifdef ENABLE_AV_ENHANCEMENTS
+        { MEDIA_MIMETYPE_AUDIO_AMR_WB_PLUS,
+            "audio_decoder.amrwbplus", "audio_encoder.amrwbplus" },
+#endif
         { MEDIA_MIMETYPE_AUDIO_AAC,
             "audio_decoder.aac", "audio_encoder.aac" },
         { MEDIA_MIMETYPE_AUDIO_VORBIS,
@@ -1024,7 +1034,11 @@ status_t ACodec::setComponentRole(
     }
 
     if (i == kNumMimeToRole) {
+#ifdef QCOM_HARDWARE
+        return ExtendedCodec::setSupportedRole(mOMX, mNode, isEncoder, mime);
+#else
         return ERROR_UNSUPPORTED;
+#endif
     }
 
     const char *role =
@@ -1149,11 +1163,21 @@ status_t ACodec::configureCodec(
     int32_t haveNativeWindow = msg->findObject("native-window", &obj) &&
             obj != NULL;
     mStoreMetaDataInOutputBuffers = false;
+    bool bAdaptivePlaybackMode = false;
     if (!encoder && video && haveNativeWindow) {
-        err = mOMX->storeMetaDataInBuffers(mNode, kPortIndexOutput, OMX_TRUE);
-        if (err != OK) {
-            ALOGE("[%s] storeMetaDataInBuffers failed w/ err %d",
-                  mComponentName.c_str(), err);
+        int32_t preferAdaptive = 0;
+        if (msg->findInt32("prefer-adaptive-playback", &preferAdaptive)
+                && preferAdaptive == 1) {
+            ALOGI("[%s] Adaptive playback preferred", mComponentName.c_str());
+        } else {
+            preferAdaptive = 0;
+            err = mOMX->storeMetaDataInBuffers(mNode, kPortIndexOutput, OMX_TRUE);
+        }
+        if (err != OK || preferAdaptive) {
+            if (!preferAdaptive) {
+                ALOGE("[%s] storeMetaDataInBuffers failed w/ err %d",
+                      mComponentName.c_str(), err);
+            }
 
             // if adaptive playback has been requested, try JB fallback
             // NOTE: THIS FALLBACK MECHANISM WILL BE REMOVED DUE TO ITS
@@ -1185,7 +1209,7 @@ status_t ACodec::configureCodec(
             if (canDoAdaptivePlayback &&
                 msg->findInt32("max-width", &maxWidth) &&
                 msg->findInt32("max-height", &maxHeight)) {
-                ALOGV("[%s] prepareForAdaptivePlayback(%ldx%ld)",
+                ALOGI("[%s] prepareForAdaptivePlayback(%ldx%ld)",
                       mComponentName.c_str(), maxWidth, maxHeight);
 
                 err = mOMX->prepareForAdaptivePlayback(
@@ -1193,6 +1217,15 @@ status_t ACodec::configureCodec(
                 ALOGW_IF(err != OK,
                         "[%s] prepareForAdaptivePlayback failed w/ err %d",
                         mComponentName.c_str(), err);
+                bAdaptivePlaybackMode = (err == OK);
+            }
+            // if Adaptive mode was tried first and codec failed it, try dynamic mode
+            if (err != OK && preferAdaptive) {
+                err = mOMX->storeMetaDataInBuffers(mNode, kPortIndexOutput, OMX_TRUE);
+                if (err != OK) {
+                    ALOGE("[%s] storeMetaDataInBuffers failed w/ err %d",
+                          mComponentName.c_str(), err);
+                }
             }
             // allow failure
             err = OK;
@@ -1200,6 +1233,9 @@ status_t ACodec::configureCodec(
             ALOGV("[%s] storeMetaDataInBuffers succeeded", mComponentName.c_str());
             mStoreMetaDataInOutputBuffers = true;
         }
+
+        ALOGI("DRC Mode: %s",(mStoreMetaDataInOutputBuffers ? "Dynamic Buffer Mode" :
+                (bAdaptivePlaybackMode ? "Adaptive Mode" : "Port Reconfig Mode")));
 
         int32_t push;
         if (msg->findInt32("push-blank-buffers-on-shutdown", &push)
@@ -1220,6 +1256,12 @@ status_t ACodec::configureCodec(
                 err = setupVideoDecoder(mime, width, height);
             }
         }
+#ifdef QCOM_HARDWARE
+        if (err == OK) {
+            const char* componentName = mComponentName.c_str();
+            ExtendedCodec::configureVideoDecoder(msg, mime, mOMX, 0, mNode, componentName);
+        }
+#endif
     } else if (!strcasecmp(mime, MEDIA_MIMETYPE_AUDIO_MPEG)) {
         int32_t numChannels, sampleRate;
         if (!msg->findInt32("channel-count", &numChannels)
@@ -1302,6 +1344,21 @@ status_t ACodec::configureCodec(
         } else {
             err = setupRawAudioFormat(kPortIndexInput, sampleRate, numChannels);
         }
+#ifdef QCOM_HARDWARE
+    } else {
+        if (encoder) {
+            int32_t numChannels, sampleRate;
+            if (msg->findInt32("channel-count", &numChannels)
+                  && msg->findInt32("sample-rate", &sampleRate)) {
+                setupRawAudioFormat(kPortIndexInput, sampleRate, numChannels);
+            }
+       }
+       err = ExtendedCodec::setAudioFormat(
+                 msg, mime, mOMX, mNode, mIsEncoder);
+       if(err != OK) {
+           return err;
+       }
+#endif
     }
 
     if (err != OK) {
@@ -1780,7 +1837,11 @@ status_t ACodec::setupVideoDecoder(
     status_t err = GetVideoCodingTypeFromMime(mime, &compressionFormat);
 
     if (err != OK) {
-        return err;
+#ifdef QCOM_HARDWARE
+        err = ExtendedCodec::setVideoOutputFormat(mime, &compressionFormat);
+        if (err != OK)
+#endif
+            return err;
     }
 
     err = setVideoPortFormatType(
@@ -1903,7 +1964,15 @@ status_t ACodec::setupVideoEncoder(const char *mime, const sp<AMessage> &msg) {
     err = GetVideoCodingTypeFromMime(mime, &compressionFormat);
 
     if (err != OK) {
-        return err;
+#ifdef QCOM_HARDWARE
+        err = ExtendedCodec::setVideoInputFormat(mime, &compressionFormat);
+        if (err != OK) {
+            ALOGE("Not a supported video mime type: %s", mime);
+#endif
+            return err;
+#ifdef QCOM_HARDWARE
+        }
+#endif
     }
 
     err = setVideoPortFormatType(
@@ -2699,7 +2768,26 @@ void ACodec::sendFormatChange(const sp<AMessage> &reply) {
                 }
 
                 default:
+                {
+#ifdef QCOM_HARDWARE
+                    AString mimeType;
+                    status_t err = ExtendedCodec::handleSupportedAudioFormats(
+                        audioDef->eEncoding, &mimeType);
+                    if (err == OK) {
+                        int channelCount;
+                        err = ExtendedCodec::getSupportedAudioFormatInfo(
+                                      &mimeType,
+                                      mOMX,
+                                      mNode,
+                                      kPortIndexOutput,
+                                      &channelCount);
+                        notify->setString("mime", mimeType.c_str());
+                        notify->setInt32("channel-count", channelCount);
+                        break;
+                    }
+#endif
                     TRESPASS();
+                }
             }
             break;
         }
@@ -3666,6 +3754,9 @@ bool ACodec::UninitializedState::onAllocateComponent(const sp<AMessage> &msg) {
             ++matchIndex) {
         componentName = matchingCodecs.itemAt(matchIndex).mName.string();
         quirks = matchingCodecs.itemAt(matchIndex).mQuirks;
+#ifdef QCOM_HARDWARE
+        ExtendedCodec::overrideComponentName(quirks, msg, &componentName);
+#endif
 
         pid_t tid = androidGetTid();
         int prevPriority = androidGetThreadPriority(tid);

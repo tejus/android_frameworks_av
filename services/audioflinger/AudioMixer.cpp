@@ -561,7 +561,11 @@ bool AudioMixer::track_t::setResampler(uint32_t value, uint32_t devSampleRate)
                       (value == 48000 && devSampleRate == 44100))) {
                     quality = AudioResampler::LOW_QUALITY;
                 } else {
+#ifdef QCOM_HARDWARE
+                    quality = AudioResampler::VERY_HIGH_QUALITY;
+#else
                     quality = AudioResampler::DEFAULT_QUALITY;
+#endif
                 }
                 resampler = AudioResampler::create(
                         format,
@@ -1122,10 +1126,6 @@ void AudioMixer::process__genericNoResampling(state_t* state, int64_t pts)
         t.bufferProvider->getNextBuffer(&t.buffer, pts);
         t.frameCount = t.buffer.frameCount;
         t.in = t.buffer.raw;
-        // t.in == NULL can happen if the track was flushed just after having
-        // been enabled for mixing.
-        if (t.in == NULL)
-            enabledTracks &= ~(1<<i);
     }
 
     e0 = enabledTracks;
@@ -1161,6 +1161,13 @@ void AudioMixer::process__genericNoResampling(state_t* state, int64_t pts)
                     aux = t.auxBuffer + numFrames;
                 }
                 while (outFrames) {
+                    // t.in == NULL can happen if the track was flushed just after having
+                    // been enabled for mixing.
+                   if (t.in == NULL) {
+                        enabledTracks &= ~(1<<i);
+                        e1 &= ~(1<<i);
+                        break;
+                    }
                     size_t inFrames = (t.frameCount > outFrames)?outFrames:t.frameCount;
                     if (inFrames) {
                         t.hook(&t, outTemp + (BLOCKSIZE-outFrames)*MAX_NUM_CHANNELS, inFrames,
